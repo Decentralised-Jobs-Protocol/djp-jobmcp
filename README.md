@@ -1,13 +1,16 @@
 # jobmcp
 
 
-https://github.com/user-attachments/assets/608dec80-083e-4a9b-a292-10a46c4a63c3
+https://github.com/user-attachments/assets/dc896463-0208-4e74-8b06-86c324298434
 
 
+we'll use the 'old' sse transport to begin building
 
-sse to begin
+To test:
 
+```bash
 npx @modelcontextprotocol/inspector
+```
 
 http://127.0.0.1:8000/sse
 
