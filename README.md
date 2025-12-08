@@ -1,5 +1,4 @@
-# jobmcp
-### djp-jobmcp is repo name, but binary can just e called 'jobmcp' as compiled
+# jobmcp 💼
 
 ## Get started
 Clone, Build, Run :
