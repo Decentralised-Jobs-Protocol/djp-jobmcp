@@ -126,3 +126,8 @@ GOOSE_MODEL: gemini-2.5-pro
 GOOSE_PROVIDER: google
 OPENAI_BASE_PATH: v1/chat/completions
 ```
+## Demo
+https://github.com/user-attachments/assets/65077834-c0bb-4e07-af07-fad76eaeb0b5
+
+
+
