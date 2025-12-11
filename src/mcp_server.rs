@@ -97,24 +97,18 @@ impl NostrJobsServer {
             "wss://relay.nostr.band".to_string(),
             "wss://nos.lol".to_string(),
             "wss://nostr-pub.wellorder.net".to_string(),
-            "wss://nostr.wine".to_string(),
+            // "wss://nostr.wine".to_string(),
         ];
 
         // Add all relays first (non-blocking)
         for relay in &relays {
-            match client.add_relay(relay).await {
-                Ok(_) => tracing::info!("Added relay: {}", relay),
-                Err(e) => tracing::warn!("Failed to add relay {}: {}", relay, e),
-            }
+            let _ = client.add_relay(relay).await;
         }
         
         // Spawn background connection task
         let client_clone = client.clone();
         tokio::spawn(async move {
-            match timeout(Duration::from_secs(15), client_clone.connect()).await {
-                Ok(_) => tracing::info!("Connected to relays"),
-                Err(_) => tracing::warn!("Relay connection timeout"),
-            }
+            let _ = timeout(Duration::from_secs(15), client_clone.connect()).await;
         });
 
         let server = Self {
@@ -146,11 +140,9 @@ impl NostrJobsServer {
             match timeout(Duration::from_secs(5), client.fetch_events(filter, Duration::from_secs(3))).await {
                 Ok(Ok(_)) => {
                     *self.relay_healthy.lock().await = true;
-                    tracing::debug!("Relays healthy");
                 }
                 _ => {
                     *self.relay_healthy.lock().await = false;
-                    tracing::warn!("Relays unhealthy");
                 }
             }
         }
@@ -226,14 +218,11 @@ impl NostrJobsServer {
         })
     }
 
-fn build_filter(_company: Option<&str>, _skill: Option<&str>, _employment_type: Option<&str>, _limit: usize) -> Filter {
-    // Fetch all kind 9993 events for in-memory filtering
-    // Use a larger limit since we filter after fetching
-    Filter::new()
-        .kind(Kind::from(9993u16))
-        .limit(100) // Fetch up to 100 to filter from
-}
-
+    fn build_filter(_company: Option<&str>, _skill: Option<&str>, _employment_type: Option<&str>, _limit: usize) -> Filter {
+        Filter::new()
+            .kind(Kind::from(9993u16))
+            .limit(100)
+    }
 
     fn cache_key(company: Option<&str>, skill: Option<&str>, employment_type: Option<&str>, limit: usize) -> String {
         format!("{}:{}:{}:{}", 
@@ -252,13 +241,10 @@ fn build_filter(_company: Option<&str>, _skill: Option<&str>, _employment_type: 
     ) -> Result<Vec<Event>, String> {
         let client = self.client.lock().await;
         
-        // Use very short timeout - fail fast to avoid MCP timeout
         match timeout(RELAY_FETCH_TIMEOUT, client.fetch_events(filter, Duration::from_millis(1500))).await {
             Ok(Ok(events)) => {
                 let events_vec: Vec<Event> = events.into_iter().collect();
                 if !events_vec.is_empty() {
-                    tracing::debug!("Fetched {} events", events_vec.len());
-                    // Update cache asynchronously
                     let cache = self.cache.clone();
                     let cached = CachedEvents {
                         events: events_vec.clone(),
@@ -272,12 +258,10 @@ fn build_filter(_company: Option<&str>, _skill: Option<&str>, _employment_type: 
                 Ok(events_vec)
             }
             Ok(Err(e)) => {
-                tracing::warn!("Fetch error: {}", e);
                 *self.relay_healthy.lock().await = false;
                 Err(format!("Fetch error: {}", e))
             }
             Err(_) => {
-                tracing::warn!("Fetch timeout");
                 *self.relay_healthy.lock().await = false;
                 Err("Relay timeout".to_string())
             }
@@ -286,151 +270,118 @@ fn build_filter(_company: Option<&str>, _skill: Option<&str>, _employment_type: 
 
     // ==================== Tools ====================
 
-// Replace the entire search_jobs method in src/mcp_server.rs with this:
+    #[tool(description = "Search for job listings on Nostr. You can filter by company, skill, or employment type.")]
+    pub async fn search_jobs(
+        &self,
+        Parameters(args): Parameters<SearchJobsArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let clean_company = args.company.as_ref().map(|s| s.trim_matches('"').to_string());
+        let clean_skill = args.skill.as_ref().map(|s| s.trim_matches('"').to_string());
+        let clean_employment_type = args.employment_type.as_ref().map(|s| s.trim_matches('"').to_string());
+        
+        let filter = Self::build_filter(
+            clean_company.as_deref(),
+            clean_skill.as_deref(),
+            clean_employment_type.as_deref(),
+            args.limit,
+        );
 
-#[tool(description = "Search for job listings on Nostr. You can filter by company, skill, or employment type.")]
-pub async fn search_jobs(
-    &self,
-    Parameters(args): Parameters<SearchJobsArgs>,
-) -> Result<CallToolResult, McpError> {
-    // Strip any surrounding quotes from string parameters (MCP Inspector bug workaround)
-    let clean_company = args.company.as_ref().map(|s| s.trim_matches('"').to_string());
-    let clean_skill = args.skill.as_ref().map(|s| s.trim_matches('"').to_string());
-    let clean_employment_type = args.employment_type.as_ref().map(|s| s.trim_matches('"').to_string());
-    
-    // Log parameters for debugging (visible in server logs only)
-    tracing::debug!(
-        "search_jobs params - company: {:?}, skill: {:?}, employment_type: {:?}, limit: {}",
-        clean_company, clean_skill, clean_employment_type, args.limit
-    );
-    
-    let filter = Self::build_filter(
-        clean_company.as_deref(),
-        clean_skill.as_deref(),
-        clean_employment_type.as_deref(),
-        args.limit,
-    );
+        let key = Self::cache_key(
+            clean_company.as_deref(),
+            clean_skill.as_deref(),
+            clean_employment_type.as_deref(),
+            args.limit,
+        );
 
-    let key = Self::cache_key(
-        clean_company.as_deref(),
-        clean_skill.as_deref(),
-        clean_employment_type.as_deref(),
-        args.limit,
-    );
-
-    // Check cache first - use any cached data
-    {
-        let cache = self.cache.read().await;
-        if let Some(cached) = cache.get(&key) {
-            tracing::info!("Cache hit for search_jobs (age: {:?})", cached.timestamp.elapsed());
-            
-            let mut results = format!("Found {} job listing(s){}:\n\n", 
-                cached.events.len(),
-                if cached.is_fresh(Duration::from_secs(60)) { "" } else { " (cached)" }
-            );
-            for (i, event) in cached.events.iter().enumerate() {
-                results.push_str(&format!("{}. {}\n\n", i + 1, self.format_job_summary(event)));
+        // Check cache first
+        {
+            let cache = self.cache.read().await;
+            if let Some(cached) = cache.get(&key) {
+                let mut results = format!("Found {} job listing(s){}:\n\n", 
+                    cached.events.len(),
+                    if cached.is_fresh(Duration::from_secs(60)) { "" } else { " (cached)" }
+                );
+                for (i, event) in cached.events.iter().enumerate() {
+                    results.push_str(&format!("{}. {}\n\n", i + 1, self.format_job_summary(event)));
+                }
+                return Ok(CallToolResult::success(vec![Content::text(results)]));
             }
-            return Ok(CallToolResult::success(vec![Content::text(results)]));
         }
-    }
 
-    // Try fresh fetch with very short timeout
-    match timeout(Duration::from_millis(2500), self.fetch_events_fast(filter, key.clone())).await {
-        Ok(Ok(mut events)) => {
-            tracing::debug!("Fetched {} events before filtering", events.len());
-            tracing::debug!("Filter params - company: {:?}, skill: {:?}, employment_type: {:?}", 
-                clean_company, clean_skill, clean_employment_type);
-            
-            // Filter in-memory since relay filtering may not work
-            events.retain(|event| {
-                let tags: Vec<_> = event.tags.iter().collect();
+        // Try fresh fetch
+        match timeout(Duration::from_millis(2500), self.fetch_events_fast(filter, key.clone())).await {
+            Ok(Ok(mut events)) => {
+                // Filter in-memory
+                events.retain(|event| {
+                    let tags: Vec<_> = event.tags.iter().collect();
+                    
+                    let matches_company = if let Some(comp) = &clean_company {
+                        tags.iter().any(|t| {
+                            let slice = t.as_slice();
+                            slice.len() >= 2 && slice[0] == "company" && 
+                            slice[1].to_lowercase().contains(&comp.to_lowercase())
+                        })
+                    } else {
+                        true
+                    };
+                    
+                    let matches_skill = if let Some(sk) = &clean_skill {
+                        tags.iter().any(|t| {
+                            let slice = t.as_slice();
+                            slice.len() >= 2 && slice[0] == "skill" && 
+                            slice[1].to_lowercase().contains(&sk.to_lowercase())
+                        })
+                    } else {
+                        true
+                    };
+                    
+                    let matches_employment = if let Some(et) = &clean_employment_type {
+                        tags.iter().any(|t| {
+                            let slice = t.as_slice();
+                            slice.len() >= 2 && slice[0] == "employment-type" && 
+                            slice[1].to_lowercase().contains(&et.to_lowercase())
+                        })
+                    } else {
+                        true
+                    };
+                    
+                    matches_company && matches_skill && matches_employment
+                });
                 
-                let matches_company = if let Some(comp) = &clean_company {
-                    let result = tags.iter().any(|t| {
-                        let slice = t.as_slice();
-                        slice.len() >= 2 && slice[0] == "company" && 
-                        slice[1].to_lowercase().contains(&comp.to_lowercase())
-                    });
-                    tracing::debug!("Company filter '{}': {}", comp, result);
-                    result
-                } else {
-                    true
-                };
+                events.truncate(args.limit);
                 
-                let matches_skill = if let Some(sk) = &clean_skill {
-                    let result = tags.iter().any(|t| {
-                        let slice = t.as_slice();
-                        let is_skill_tag = slice.len() >= 2 && slice[0] == "skill";
-                        let matches = is_skill_tag && slice[1].to_lowercase().contains(&sk.to_lowercase());
-                        if is_skill_tag {
-                            tracing::debug!("Checking skill tag '{}' against '{}': {}", slice[1], sk, matches);
-                        }
-                        matches
-                    });
-                    tracing::debug!("Skill filter '{}': {}", sk, result);
-                    result
-                } else {
-                    true
-                };
-                
-                let matches_employment = if let Some(et) = &clean_employment_type {
-                    let result = tags.iter().any(|t| {
-                        let slice = t.as_slice();
-                        slice.len() >= 2 && slice[0] == "employment-type" && 
-                        slice[1].to_lowercase().contains(&et.to_lowercase())
-                    });
-                    tracing::debug!("Employment type filter '{}': {}", et, result);
-                    result
-                } else {
-                    true
-                };
-                
-                let overall_match = matches_company && matches_skill && matches_employment;
-                tracing::debug!("Event {} overall match: {}", event.id.to_hex(), overall_match);
-                overall_match
-            });
-            
-            tracing::debug!("After filtering: {} events", events.len());
-            
-            // Limit to requested amount after filtering
-            events.truncate(args.limit);
-            
-            if events.is_empty() {
-                return Ok(CallToolResult::success(vec![Content::text(
-                    "No job listings found matching your criteria.".to_string()
-                )]));
+                if events.is_empty() {
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        "No job listings found matching your criteria.".to_string()
+                    )]));
+                }
+
+                let mut results = format!("Found {} job listing(s):\n\n", events.len());
+                for (i, event) in events.iter().enumerate() {
+                    results.push_str(&format!("{}. {}\n\n", i + 1, self.format_job_summary(event)));
+                }
+
+                Ok(CallToolResult::success(vec![Content::text(results)]))
             }
-
-            let mut results = format!("Found {} job listing(s):\n\n", events.len());
-            for (i, event) in events.iter().enumerate() {
-                results.push_str(&format!("{}. {}\n\n", i + 1, self.format_job_summary(event)));
-            }
-
-            Ok(CallToolResult::success(vec![Content::text(results)]))
-        }
-        _ => {
-            // Return helpful message about relay issues
-            let healthy = *self.relay_healthy.lock().await;
-            if healthy {
-                Ok(CallToolResult::success(vec![Content::text(
-                    "⏳ Search in progress...\n\
-                     Relays are responding but queries are slow.\n\
-                     Please try again shortly."
-                )]))
-            } else {
-                Ok(CallToolResult::success(vec![Content::text(
-                    "🔄 Starting relay connection...\n\n\
-                     The Nostr relays are initializing.\n\
-                     Please try again in a moment.\n\n\
-                     💡 Tip: Results will be cached once available."
-                )]))
+            _ => {
+                let healthy = *self.relay_healthy.lock().await;
+                if healthy {
+                    Ok(CallToolResult::success(vec![Content::text(
+                        "⏳ Search in progress...\n\
+                         Relays are responding but queries are slow.\n\
+                         Please try again shortly."
+                    )]))
+                } else {
+                    Ok(CallToolResult::success(vec![Content::text(
+                        "🔄 Starting relay connection...\n\n\
+                         The Nostr relays are initializing.\n\
+                         Please try again in a moment.\n\n\
+                         💡 Tip: Results will be cached once available."
+                    )]))
+                }
             }
         }
     }
-}
-
-
 
     #[tool(description = "Get detailed information about a specific job listing by its Job ID or Event ID")]
     pub async fn get_job_details(
