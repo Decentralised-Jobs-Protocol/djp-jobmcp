@@ -242,6 +242,7 @@ impl NostrJobsServer {
             "wss://relay.nostr.band".to_string(),
             "wss://nos.lol".to_string(),
             "wss://nostr-pub.wellorder.net".to_string(),
+            // "wss://nostr.wine".to_string(),
         ];
 
         tracing::info!(
@@ -290,18 +291,10 @@ impl NostrJobsServer {
                 Ok(Ok(_)) => {
                     let was_healthy = *self.relay_healthy.lock().await;
                     *self.relay_healthy.lock().await = true;
-                    
-                    if !was_healthy {
-                        tracing::info!("relay_health_recovered");
-                    }
                 }
                 _ => {
                     let was_healthy = *self.relay_healthy.lock().await;
                     *self.relay_healthy.lock().await = false;
-                    
-                    if was_healthy {
-                        tracing::warn!("relay_health_degraded");
-                    }
                 }
             }
         }
@@ -430,34 +423,10 @@ impl NostrJobsServer {
                 Ok(events_vec)
             }
             Ok(Err(e)) => {
-                let duration_ms = start.elapsed().as_millis();
-                
-                tracing::warn!(
-                    cache_key = %cache_key,
-                    duration_ms = duration_ms,
-                    error = %e,
-                    source = "relay",
-                    success = false,
-                    "fetch_events_error"
-                );
-                
-                self.metrics.write().await.record_cache_miss(duration_ms, false);
                 *self.relay_healthy.lock().await = false;
                 Err(format!("Fetch error: {}", e))
             }
             Err(_) => {
-                let duration_ms = start.elapsed().as_millis();
-                
-                tracing::warn!(
-                    cache_key = %cache_key,
-                    duration_ms = duration_ms,
-                    source = "relay",
-                    success = false,
-                    reason = "timeout",
-                    "fetch_events_timeout"
-                );
-                
-                self.metrics.write().await.record_cache_miss(duration_ms, false);
                 *self.relay_healthy.lock().await = false;
                 Err("Relay timeout".to_string())
             }
@@ -491,42 +460,23 @@ impl NostrJobsServer {
 
         // Check cache first
         {
-            let start = std::time::Instant::now();
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(&key) {
-                let duration_ms = start.elapsed().as_millis();
-                let is_fresh = cached.is_fresh(Duration::from_secs(60));
-                
-                tracing::info!(
-                    cache_key = %key,
-                    duration_ms = duration_ms,
-                    event_count = cached.events.len(),
-                    source = "cache",
-                    is_fresh = is_fresh,
-                    "cache_hit"
-                );
-                
-                self.metrics.write().await.record_cache_hit(duration_ms);
-                
                 let mut results = format!("Found {} job listing(s){}:\n\n", 
                     cached.events.len(),
-                    if is_fresh { " ⚡ [CACHED]" } else { " 📦 [CACHED - STALE]" }
+                    if cached.is_fresh(Duration::from_secs(60)) { "" } else { " (cached)" }
                 );
                 for (i, event) in cached.events.iter().enumerate() {
                     results.push_str(&format!("{}. {}\n\n", i + 1, self.format_job_summary(event)));
                 }
                 return Ok(CallToolResult::success(vec![Content::text(results)]));
-            } else {
-                tracing::debug!(
-                    cache_key = %key,
-                    "cache_miss"
-                );
             }
         }
 
         // Try fresh fetch
         match timeout(Duration::from_millis(2500), self.fetch_events_fast(filter, key.clone())).await {
             Ok(Ok(mut events)) => {
+                // Filter in-memory
                 events.retain(|event| {
                     let tags: Vec<_> = event.tags.iter().collect();
                     
@@ -571,7 +521,7 @@ impl NostrJobsServer {
                     )]));
                 }
 
-                let mut results = format!("Found {} job listing(s) 🌐 [FRESH]:\n\n", events.len());
+                let mut results = format!("Found {} job listing(s):\n\n", events.len());
                 for (i, event) in events.iter().enumerate() {
                     results.push_str(&format!("{}. {}\n\n", i + 1, self.format_job_summary(event)));
                 }
